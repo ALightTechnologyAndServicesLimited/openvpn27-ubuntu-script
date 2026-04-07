@@ -59,6 +59,6 @@ RUN mkdir -p package/usr/local && \
     cd package && \
     tar -czf /output/openvpn-pq-build.tar.gz .
 
-# Export stage using scratch
-FROM scratch AS export
+# Export stage
+FROM alpine:3.19 AS export
 COPY --from=builder /output/openvpn-pq-build.tar.gz /
