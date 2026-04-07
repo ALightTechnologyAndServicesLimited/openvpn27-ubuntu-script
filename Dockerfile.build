@@ -1,0 +1,64 @@
+FROM ubuntu:24.04 AS builder
+
+# Set environment variables for versions and paths
+ENV OPENSSL_VERSION="3.6.1"
+ENV OPENVPN_VERSION="2.7.0"
+ENV PREFIX_SSL="/usr/local/ssl"
+ENV PREFIX_OPENVPN="/usr/local/openvpn"
+ENV BUILD_DIR="/usr/local/src"
+
+# Install build dependencies
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    build-essential automake autoconf libtool pkg-config \
+    liblzo2-dev libpam0g-dev liblz4-dev libcap-ng-dev \
+    python3 python3-docutils libsystemd-dev git cmake wget \
+    ca-certificates curl zlib1g-dev libnl-genl-3-dev gnupg
+
+RUN mkdir -p ${BUILD_DIR}
+WORKDIR ${BUILD_DIR}
+
+# Download and build OpenSSL
+RUN wget --https-only --ca-certificate=/etc/ssl/certs/ca-certificates.crt \
+    https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
+    tar xzf openssl-${OPENSSL_VERSION}.tar.gz && \
+    cd openssl-${OPENSSL_VERSION} && \
+    ./config --prefix=${PREFIX_SSL} --openssldir=${PREFIX_SSL} shared zlib && \
+    make -j$(nproc) && \
+    make install
+
+# Configure dynamic linker for OpenSSL
+RUN echo "${PREFIX_SSL}/lib64" > /etc/ld.so.conf.d/openssl-3.6.conf && \
+    echo "${PREFIX_SSL}/lib" >> /etc/ld.so.conf.d/openssl-3.6.conf && \
+    ldconfig
+
+# Download and build OpenVPN
+RUN wget --https-only --ca-certificate=/etc/ssl/certs/ca-certificates.crt \
+    https://github.com/OpenVPN/openvpn/releases/download/v${OPENVPN_VERSION}/openvpn-${OPENVPN_VERSION}.tar.gz && \
+    tar xzf openvpn-${OPENVPN_VERSION}.tar.gz && \
+    cd openvpn-${OPENVPN_VERSION} && \
+    # Determine lib dir
+    SSL_LIB_DIR=$([ -d "${PREFIX_SSL}/lib64" ] && echo "${PREFIX_SSL}/lib64" || echo "${PREFIX_SSL}/lib") && \
+    PKG_CONFIG_PATH="${SSL_LIB_DIR}/pkgconfig" \
+    ./configure --prefix=${PREFIX_OPENVPN} \
+      OPENSSL_CRYPTO_CFLAGS="-I${PREFIX_SSL}/include" \
+      OPENSSL_CRYPTO_LIBS="-L${SSL_LIB_DIR} -lcrypto" \
+      OPENSSL_SSL_CFLAGS="-I${PREFIX_SSL}/include" \
+      OPENSSL_SSL_LIBS="-L${SSL_LIB_DIR} -lssl" \
+      --enable-systemd && \
+    make -j$(nproc) && \
+    make install
+
+# Create tarball of the built binaries and libraries
+WORKDIR /output
+RUN mkdir -p package/usr/local && \
+    cp -r ${PREFIX_SSL} package/usr/local/ssl && \
+    cp -r ${PREFIX_OPENVPN} package/usr/local/openvpn && \
+    # Clean up unnecessary files to reduce size
+    rm -rf package/usr/local/ssl/include package/usr/local/ssl/share \
+           package/usr/local/openvpn/include package/usr/local/openvpn/share && \
+    cd package && \
+    tar -czf /output/openvpn-pq-build.tar.gz .
+
+# Export stage using scratch
+FROM scratch AS export
+COPY --from=builder /output/openvpn-pq-build.tar.gz /
